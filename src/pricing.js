@@ -6,6 +6,7 @@ const IGV = 0.18;
 const CUPONES = {
   CYBER10: 0.10,
   CYBER25: 0.25,
+  CYBER40: 0.40,
   BIENVENIDO: 0.05
 };
 
