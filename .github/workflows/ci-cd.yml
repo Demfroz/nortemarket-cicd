@@ -1,0 +1,187 @@
+# ============================================================================
+#  NorteMarket S.A.C. — Flujo CI/CD automatizado
+#  Etapas: 1 Commit/PR · 2 Compilación y pruebas · 3 Imagen Docker
+#          4 Staging automático · [aprobación manual] · 5 Producción blue/green
+#          6 Verificación y monitoreo
+#  El despliegue es SIMULADO: los contenedores se levantan en el propio runner,
+#  representando las tareas de Amazon ECS Fargate descritas en el trabajo.
+# ============================================================================
+name: CI/CD NorteMarket
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '20'
+  IMAGEN: nortemarket-api
+
+jobs:
+
+  # ---------------------------------------------------------------- ETAPA 2a
+  # Análisis estático y de dependencias (SAST). Corre EN PARALELO con la
+  # compilación para no alargar el tiempo total del pipeline.
+  analisis-estatico:
+    name: 2a · Análisis estático y de dependencias
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm                      # caché de dependencias: ~3 min → <40 s
+      - run: npm ci
+      - name: ESLint (calidad y patrones inseguros)
+        run: npm run lint
+      - name: npm audit (vulnerabilidades conocidas en librerías)
+        run: npm audit --audit-level=critical
+        continue-on-error: true           # informa sin detener el proyecto demostrativo
+
+  # ---------------------------------------------------------------- ETAPA 2b
+  compilacion:
+    name: 2b · Compilación
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Instalar dependencias respetando el archivo de bloqueo
+        run: npm ci
+      - name: Compilar el artefacto
+        run: npm run build
+        env:
+          APP_VERSION: ${{ github.sha }}
+      - name: Publicar el artefacto compilado
+        uses: actions/upload-artifact@v4
+        with:
+          name: artefacto-compilado
+          path: dist/
+          retention-days: 5
+
+  # ----------------------------------------------------------------- ETAPA 2c
+  # Si la compilación falla, este job no se ejecuta: primer filtro de calidad.
+  pruebas:
+    name: 2c · Pruebas automatizadas
+    runs-on: ubuntu-latest
+    needs: compilacion
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Pruebas unitarias (Jest · cobertura mínima del 80 %)
+        run: npm run test:unit
+      - name: Pruebas de integración (Supertest · 100 % de casos)
+        run: npm run test:integration
+      - name: Publicar el reporte de cobertura
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reporte-cobertura
+          path: coverage/
+          retention-days: 5
+
+  # ------------------------------------------------------------------ ETAPA 3
+  # Construcción y "publicación" de la imagen. En el diseño real se hace
+  # docker push a Amazon ECR; aquí la imagen se guarda como artefacto del
+  # pipeline, cumpliendo la misma función: un artefacto inmutable y trazable.
+  imagen:
+    name: 3 · Imagen Docker y análisis de seguridad
+    runs-on: ubuntu-latest
+    needs: [analisis-estatico, pruebas]
+    outputs:
+      etiqueta: ${{ steps.meta.outputs.etiqueta }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Definir la etiqueta con el SHA del commit (nunca "latest")
+        id: meta
+        run: echo "etiqueta=${{ env.IMAGEN }}:${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - name: Construir la imagen multietapa
+        run: |
+          docker build --build-arg APP_VERSION=${GITHUB_SHA::7} \
+            -t ${{ steps.meta.outputs.etiqueta }} .
+          echo "Tamaño de la imagen final:"
+          docker images ${{ steps.meta.outputs.etiqueta }} --format '{{.Size}}'
+      - name: Escaneo de vulnerabilidades (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.meta.outputs.etiqueta }}
+          severity: CRITICAL,HIGH
+          exit-code: '0'    # en producción se pondría '1' para detener el flujo
+      - name: Guardar la imagen como artefacto (equivale al push a Amazon ECR)
+        run: docker save ${{ steps.meta.outputs.etiqueta }} -o imagen.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: imagen-docker
+          path: imagen.tar
+          retention-days: 3
+
+  # ------------------------------------------------------------------ ETAPA 4
+  # Despliegue automático en staging + pruebas E2E y de carga.
+  # Solo desde las ramas principales: los Pull Request se quedan en la etapa 2.
+  staging:
+    name: 4 · Despliegue automático en staging
+    runs-on: ubuntu-latest
+    needs: imagen
+    if: github.event_name != 'pull_request'
+    environment:
+      name: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: imagen-docker }
+      - name: Cargar la imagen validada
+        run: docker load -i imagen.tar
+      - name: Desplegar en staging (simula ECS update-service)
+        run: bash scripts/deploy-staging.sh ${{ needs.imagen.outputs.etiqueta }}
+        env:
+          APP_VERSION: ${{ github.sha }}
+      - name: Pruebas E2E y de carga sobre staging
+        run: bash scripts/e2e-test.sh
+
+  # --------------------------------------------- COMPUERTA + ETAPAS 5 Y 6
+  # El entorno "production" tiene un revisor obligatorio: GitHub detiene aquí
+  # el flujo hasta que el líder técnico aprueba, y registra quién y cuándo.
+  # Solo se publica desde main.
+  produccion:
+    name: 5 y 6 · Producción blue/green y verificación
+    runs-on: ubuntu-latest
+    needs: [imagen, staging]
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: imagen-docker }
+      - run: docker load -i imagen.tar
+      - name: Despliegue blue/green con desvío progresivo del tráfico
+        run: bash scripts/deploy-bluegreen.sh ${{ needs.imagen.outputs.etiqueta }}
+        env:
+          APP_VERSION: ${{ github.sha }}
+      - name: Smoke tests sobre las rutas críticas
+        run: bash scripts/smoke-test.sh
+      - name: Reversión automática si algo falló
+        if: failure()
+        run: bash scripts/rollback.sh
+      - name: Resumen del despliegue (métricas DORA)
+        if: always()
+        run: |
+          {
+            echo "## Despliegue de NorteMarket"
+            echo ""
+            echo "| Dato | Valor |"
+            echo "|---|---|"
+            echo "| Versión publicada | \`${GITHUB_SHA::7}\` |"
+            echo "| Rama | \`${GITHUB_REF_NAME}\` |"
+            echo "| Estrategia | blue/green 10 % → 50 % → 100 % |"
+            echo "| Aprobado por | @${GITHUB_ACTOR} |"
+            echo "| Reversión | automática, menos de 2 minutos |"
+          } >> "$GITHUB_STEP_SUMMARY"
