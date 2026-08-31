@@ -239,5 +239,6 @@ Captura estas pantallas y anéxalas:
 | El job de producción nunca pide aprobación | El entorno `production` no tiene *Required reviewers*, o el repositorio es privado sin plan de pago |
 | El despliegue no se ejecuta | Es un Pull Request: por diseño solo corre en `develop` y `main` |
 | `npm run lint` falla por `no-console` | Usa el comentario `// eslint-disable-next-line no-console` como en `src/server.js` |
+| `Unable to resolve action aquasecurity/trivy-action@0.28.0` | Esa versión de la acción no existe. Usa `aquasecurity/trivy-action@v0.36.0` (con la `v` delante) |
 | Docker falla en local | Docker Desktop no está encendido |
 | Los puertos 3001/3010/3011 están ocupados | `docker rm -f nortemarket-staging nortemarket-blue nortemarket-green` |

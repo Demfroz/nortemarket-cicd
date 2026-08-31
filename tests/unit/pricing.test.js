@@ -30,6 +30,10 @@ describe('aplicarDescuento', () => {
     expect(aplicarDescuento(1000, 'CYBER25')).toBe(750);
   });
 
+  test('CYBER40 descuenta el 40 %', () => {
+  expect(aplicarDescuento(1000, 'CYBER40')).toBe(600);
+});
+
   test('un cupón inexistente no altera el monto', () => {
     expect(aplicarDescuento(1000, 'NOEXISTE')).toBe(1000);
   });
